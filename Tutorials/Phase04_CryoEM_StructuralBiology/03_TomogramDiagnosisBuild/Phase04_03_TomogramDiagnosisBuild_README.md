@@ -4,31 +4,221 @@
 
 This is a **hands-on practical** rather than a Jupyter notebook. You will process a real
 cryo-ET tilt series from the public dataset **EMPIAR-10164** using IMOD/Etomo — the same
-software stack used by structural-biology labs worldwide. You will build two tomographic
-reconstructions, systematically diagnose their quality, and answer a set of guided
-questions that connect the computational theory from Modules 01 and 02 to real experimental
-data.
+software stack used by structural-biology labs worldwide. Working through three processing
+steps (stack → align → reconstruct) and four guided diagnostic questions will translate the
+computational theory from Modules 01 and 02 into the muscle memory of operating production
+software on experimental data.
 
-This practical bridges the gap between "I understand the algorithm in a notebook" and "I
-can operate production software on real data."
+The dataset is *Mycoplasma pneumoniae* imaged by plunge-freezing cryo-ET. The reconstructed
+tomograms show the cytoplasmic membrane, densely packed ribosomes (~25 nm diameter), and
+surface protein complexes including the attachment organelle — making it an excellent
+learning dataset because there are visually obvious spherical and planar structures to use
+as landmarks when evaluating reconstruction quality and missing-wedge artefacts.
+
+By the end you will have produced and compared two tomographic reconstructions of the same
+tilt series, identified the missing-wedge artefact in your own data, and made a quantitative
+judgement about alignment quality, reconstruction method choice, and achievable resolution.
+Every result you observe will map directly to a concept introduced computationally in
+Modules 01 or 02; the table in the final section of this README makes those connections
+explicit.
+
+**Complete Modules 01 and 02 first.** The CTF, missing wedge, WBP, SIRT, and fiducial
+residual concepts are all introduced computationally in those modules. Arriving without that
+background makes the Etomo dialogue boxes difficult to interpret and the diagnostic questions
+impossible to answer from principle rather than by guessing.
 
 ---
 
-## Prerequisites
+## What you will learn
 
-**Complete Modules 01 and 02 first.** The concepts you will encounter here — CTF, missing
-wedge, WBP, SIRT, fiducial residuals — are all introduced computationally in those modules.
-Arriving here without that background will make the IMOD dialogue boxes difficult to
-interpret.
+### The cryo-ET acquisition geometry
 
-**Software to install before starting:**
-- **IMOD** (includes Etomo and 3dmod): https://bio3d.colorado.edu/imod/download.html
-  - Linux (Ubuntu 20.04+): install via the provided shell script
-  - macOS: installer DMG available; requires Rosetta 2 on Apple Silicon
-  - Windows: not natively supported — use **WSL2** with Ubuntu, or a Linux VM
-- **Warp** (optional but recommended): https://www.warpem.com
-  - Handles motion correction of multi-frame tilt movies before IMOD stacking
-  - If unavailable, the IMOD-only path is described in the practical document
+CryoET imaging is not a single exposure. The specimen is mounted on a tilting stage and
+imaged sequentially at discrete angles — a **tilt series** — to provide the angular coverage
+needed for 3-D reconstruction. A typical acquisition covers −60° to +60° in 3° steps
+(roughly 40 images), but the physical geometry of the cryo-holder limits maximum tilt to
+approximately ±70°. The angular range that is never imaged is the **missing wedge**: a
+cone-shaped region of Fourier space that remains permanently unsampled, causing
+direction-dependent smearing artefacts in the final tomogram.
+
+Each tilt is also recorded in **movie mode**: the detector reads out many successive frames
+during continuous beam exposure. This allows post-hoc alignment of the frames to correct
+**beam-induced specimen motion** — the tendency of the thin ice layer to shift and buckle
+under electron irradiation. Without motion correction, each tilt image is a blurred
+superposition of slightly shifted frames, degrading all features and reducing the achievable
+resolution.
+
+### Step A — Motion correction and tilt-stack assembly
+
+The first processing step converts the raw per-tilt movie files into a single aligned stack
+that Etomo can reconstruct. Two paths are available:
+
+**With Warp (recommended):** Warp fits a per-frame, per-patch polynomial motion trajectory
+to each patch of the detector independently, then averages the corrected frames to produce a
+single motion-corrected image per tilt. It exports an IMOD-compatible `.st` stack and an
+updated `.mdoc` metadata file. Follow the teamtomo "Stack generation" walkthrough for the
+exact steps.
+
+**IMOD-only path:** The IMOD command `alignframes` performs whole-frame alignment by
+cross-correlating successive frames, then `newstack` assembles the corrected images into a
+`.st` stack. The motion model is less sophisticated than Warp's patch-based approach, so
+residual motion will be slightly higher — but the downstream alignment and reconstruction
+pipeline is identical.
+
+After this step you should have a single `.st` file with approximately 40 images ordered
+from most negative to most positive tilt angle.
+
+### Step B — Fiducial-based tilt-series alignment
+
+The tilt stack is a sequence of 2-D images each recorded at a slightly different physical
+stage position. Before reconstruction, all images must be brought into a common coordinate
+frame. EMPIAR-10164 uses **colloidal gold fiducials** — spherical gold nanoparticles (~10 nm
+diameter) adsorbed to the specimen surface that appear as bright, compact, high-contrast
+dots and can be tracked reliably across the full tilt range.
+
+The alignment model fitted by Etomo is a per-tilt geometric transformation:
+
+$$\mathbf{x}'_i = s_i\, R(\phi_i)\, (\mathbf{x}_i - \mathbf{c}_i) + \mathbf{t}_i$$
+
+where $s_i$ is a per-tilt magnification, $R(\phi_i)$ an in-plane rotation, $\mathbf{c}_i$
+the tilt axis, and $\mathbf{t}_i$ a translation. The parameters are estimated by minimising
+the sum of squared distances between the observed 2-D bead positions and those predicted
+by projecting a fitted 3-D bead model through each transform. This residual error is the
+primary quality indicator for the alignment step.
+
+**Interpreting residuals:**
+
+| Mean residual | Assessment |
+|---------------|------------|
+| < 0.5 px | Excellent — reconstruction will be close to the theoretical resolution limit |
+| 0.5–1.0 px | Acceptable for most purposes |
+| 1.0–1.5 px | Marginal — check for poorly tracked beads or large inter-tilt stage-shift jumps |
+| > 1.5 px | Poor — tracking has failed for some tilts; investigate before reconstructing |
+
+High-tilt images (> ±50°) routinely contribute the worst per-tilt residuals. At steep
+angles the foreshortened geometry stretches the projected bead into an elongated ellipse,
+the in-plane SNR drops (the beam path through the specimen is longer), and any imperfection
+in the stage tilt is magnified in the image plane. This is expected behaviour — but a
+per-tilt residual more than 3–4× the mean for any single image suggests that tilt is
+corrupted or that the bead model failed there, and it can be excluded before reconstruction.
+
+**Practical tracking workflow in Etomo:**
+1. Set the gold bead radius precisely — measure several bead diameters in 3dmod and divide by 2
+2. Run Automatic Seed Finding to detect beads in the zero-degree tilt
+3. Run Beadtrack to propagate bead positions through the full tilt range
+4. Inspect the bead model in 3dmod and manually correct any incorrectly tracked beads
+5. Rerun the alignment optimisation until residuals stabilise
+
+### Step C — Weighted Back Projection (WBP)
+
+WBP is the direct implementation of the Fourier Slice Theorem introduced in Module 02: the
+2-D Fourier transform of each CTF-corrected tilt image is inserted into the appropriate
+plane of a 3-D Fourier volume, and the filled volume is inverse-transformed to produce the
+reconstruction. In practice this is implemented in real space as back-projection, with a
+**radial weighting filter** (the `radial` setting in Etomo) applied to each tilt before
+accumulation.
+
+The radial filter corrects for the fact that low-spatial-frequency regions of Fourier space
+receive contributions from more projection directions than high-frequency regions. Without
+compensation, back-projection over-weights low frequencies and the reconstruction is blurred.
+The standard ramp filter $|k|$ multiplied by a low-pass roll-off compensates this density
+difference and produces the characteristic high-contrast, high-noise WBP appearance.
+
+| Property | WBP |
+|----------|-----|
+| Speed | Fast — a single pass through the tilt series |
+| Noise level | High — the ramp filter amplifies all frequencies including noise |
+| Streaking | Present near high-contrast objects (gold beads, carbon edges) |
+| Intensity scale | Linear — density values are quantitatively comparable |
+| Best for | Sub-tomogram averaging, template matching, FSC resolution measurement |
+
+### Step C — Simultaneous Iterative Reconstruction Technique (SIRT)
+
+SIRT is an iterative algorithm that applies no frequency-domain filter. Instead it starts
+from a zero-filled volume and refines it by repeatedly forward-projecting the current
+estimate at all tilt angles, computing the difference from the measured tilt images,
+back-projecting the error, and updating the volume by adding a fraction of that error.
+After 10–50 iterations the volume converges toward a solution that minimises the total
+squared discrepancy between the measured tilts and the forward projections of the
+reconstruction.
+
+Because SIRT never applies a ramp filter, it does not amplify high-frequency noise, and
+the iterative error-correction suppresses the linear streaking artefacts that dominate WBP
+near high-contrast objects. The trade-off is that SIRT is substantially slower and produces
+an intensity scale that is not directly proportional to electron density — making
+quantitative density comparisons across volumes unreliable.
+
+| Property | SIRT |
+|----------|------|
+| Speed | Slow — each iteration repeats the full forward and backward projection |
+| Noise level | Low — iterative convergence implicitly suppresses high-frequency noise |
+| Streaking | Greatly reduced compared to WBP |
+| Intensity scale | Non-linear — values not directly comparable across volumes |
+| Best for | Visual inspection, manual segmentation, automated segmentation |
+
+### The missing wedge in a real tomogram
+
+Module 02 simulated the missing wedge from synthetic projections. Here you will observe it
+in your own data. In real space the effect is direction-dependent smearing: any feature
+whose density extends along the beam axis (Z) is elongated in Z because the Fourier
+components that would define its Z extent are missing. Gold beads are the cleanest
+diagnostic — they are perfectly spherical in reality, so every deviation from a sphere in
+3dmod is a pure reconstruction artefact.
+
+To observe the missing wedge in 3dmod's Slicer:
+
+```bash
+3dmod TS_01_WBP.rec    # open the reconstruction
+# Ctrl+T → Slicer window
+# Set slab thickness to ~5 nm
+# Middle-click drag to rotate around the Y axis (the tilt axis)
+# Watch a gold bead elongate as you approach 90° (beam direction)
+```
+
+Reconstructing a second time after excluding all tilts beyond ±40° (Etomo's "Exclude Views")
+exaggerates the missing wedge from ±20° to ±50°, making the Z-elongation dramatically more
+visible and connecting directly to the Fourier-space cone shown in Module 02.
+
+### Pixel size, binning, and the Nyquist limit
+
+Every cryo-ET reconstruction has a physical pixel size that sets the resolution ceiling,
+determined by the chain:
+
+$$\text{pixel size} = \frac{\text{detector pixel size (µm)}}{\text{magnification}} \times \text{binning factor}$$
+
+The **Nyquist frequency** is $1 / (2 \times \text{pixel size in Å})$, the highest spatial
+frequency that can be represented. No structural information finer than this scale can be
+recovered regardless of the reconstruction algorithm. **Binning** trades resolution for
+speed and contrast: a bin-4 tomogram runs ~16× faster than bin-1 but has 4× worse Nyquist
+limit. For EMPIAR-10164, bin 4–8 is typical for initial visual inspection and template
+matching; final sub-tomogram averaging is done at bin 1 or 2.
+
+### The four diagnostic questions
+
+All four questions must be answered in `build_and_diagnose_tomogram.md`, each with a written
+answer and a screenshot from Etomo or 3dmod.
+
+**Q1 — Alignment quality:** Record the final mean fiducial residual from the Etomo alignment
+log. Identify which tilt angles contribute the largest per-tilt residuals and give the
+physical explanation for why those angles are worse. Expected target: < 0.5 px is good;
+> 1.5 px indicates a tracking problem that should be resolved before reconstruction.
+
+**Q2 — Missing-wedge artefact:** Produce two reconstructions — one with the full tilt range,
+one excluding all tilts beyond ±40°. In 3dmod's Slicer, compare the shape of gold beads and
+ribosome densities in both. Describe the artefact in Z vs XY, and explain why membranes
+parallel to the XY plane appear normal while membranes parallel to the beam axis are smeared
+or invisible.
+
+**Q3 — WBP vs SIRT:** Select the same region of interest (a membrane patch, a cluster of
+ribosomes, and a gold bead) in both reconstructions. Assess which method shows less linear
+streaking, which looks sharper vs smoother, and which you would trust for template matching
+vs for manual or automated segmentation. Justify each choice from the properties tables
+above.
+
+**Q4 — Pixel size and Nyquist limit:** From the Etomo log or the tomogram header, note the
+pixel size in ångströms. Calculate the Nyquist limit. Assess visually whether the structural
+features you can resolve approach that limit, and suggest whether changing the binning factor
+would benefit a downstream sub-tomogram averaging project.
 
 ---
 
@@ -36,182 +226,98 @@ interpret.
 
 | File | Description |
 |------|-------------|
-| `build_and_diagnose_tomogram.md` | Step-by-step instructions for all three steps (stack → align → reconstruct), four diagnostic questions with answer templates, and guidance on what good vs bad results look like |
+| `build_and_diagnose_tomogram.md` | Step-by-step instructions and answer templates for all four diagnostic questions |
 
 ---
 
-## Dataset: EMPIAR-10164
+## Dataset
 
-**EMPIAR** (Electron Microscopy Public Image Archive) is the community repository for raw
-cryoEM and cryo-ET data, analogous to the PDB for atomic coordinates.
+**EMPIAR-10164** — cryo-ET data of *Mycoplasma pneumoniae* cells prepared by plunge-freezing,
+deposited in the Electron Microscopy Public Image Archive (EMPIAR), the community repository
+for raw cryoEM data. The reconstructed tomograms show the cytoplasmic membrane, packed
+ribosomes, and surface complexes including the attachment organelle, making it a visually
+rich and widely used teaching dataset.
 
-EMPIAR-10164 contains cryo-ET data of **Mycoplasma pneumoniae** — a small bacterial cell
-whose cytoplasmic membrane, ribosomes, and surface protein complexes are visible in the
-reconstructed tomograms.
-
-For this practical you will work with **TS_01** (tilt series 01), one of a 5-tilt-series
-subset that the teamtomo walkthrough provides a download script for:
+For this practical you will work with **TS_01** from a 5-tilt-series subset that the
+teamtomo walkthrough provides a download script for:
 
 ```
 https://teamtomo.org/teamtomo-site-archive/walkthroughs/EMPIAR-10164/preparation.html
 ```
 
-The download consists of:
-- Per-tilt multi-frame `.mrc` files (raw movies, one per tilt angle)
-- SerialEM `.mdoc` metadata files (acquisition parameters, tilt angles, defocus estimates)
-
-Total download size for TS_01: ~8–12 GB.
-
----
-
-## The three processing steps
-
-### Step A: Build the tilt stack
-
-CryoET data is acquired as a **tilt series** — the specimen is imaged at many angles
-(typically −60° to +60° in 3° increments = ~40 images) to provide the angular coverage
-needed for 3-D reconstruction.
-
-Each tilt is recorded as a **movie** of multiple frames (the detector's movie mode) that
-must first be aligned and averaged to correct beam-induced sample motion. This step
-produces a single corrected image per tilt angle. The corrected images are then stacked
-into a single `.st` file that Etomo can process.
-
-**With Warp:** Follow the teamtomo walkthrough "Stack generation" section. Warp performs
-motion correction and exports an IMOD-compatible stack directly.
-
-**IMOD-only path:** Use `alignframes` for per-frame alignment and `newstack` to assemble
-the final stack. Quality will be slightly lower (Warp's motion correction is more
-sophisticated) but the reconstruction pipeline is identical.
-
-### Step B: Align the tilt series (fiducial tracking)
-
-The tilt stack is a sequence of 2-D images, but each image was recorded at a different
-stage position. Before reconstruction, all images must be aligned to a common coordinate
-system. EMPIAR-10164 uses **colloidal gold fiducials** — tiny gold spheres attached to
-the specimen that appear as high-contrast dots in the images and can be tracked across all
-tilt angles.
-
-In Etomo:
-1. Choose **Fiducial Model Based** alignment
-2. Pick fiducials manually (or automatically) in the first tilt
-3. Use the automated **Fiducial Tracking** to follow beads through the tilt range
-4. Iterate the tracking until the **mean residual** (average deviation of tracked bead
-   positions from the fitted model) stabilises
-
-**Target residual:** < 1 pixel is acceptable; < 0.5 pixels is good. High-tilt images
-(> ±50°) typically have worse residuals because the foreshortened geometry stretches the
-fiducials and makes them harder to track accurately.
-
-The alignment produces a transformation file that maps each tilt image into the common
-coordinate frame. This is used during reconstruction.
-
-### Step C: Reconstruct two tomograms
-
-Reconstruct the aligned tilt series using two complementary algorithms:
-
-**Weighted Back Projection (WBP):**
-- Direct application of the Fourier Slice Theorem (see Module 02)
-- Each CTF-corrected tilt is back-projected into 3-D space and summed
-- Fast and linear; the gold standard for high-resolution work
-- Produces streaking artefacts from high-contrast objects (gold beads, carbon edges)
-- The `radial` weighting filter in Etomo applies the standard WBP ramp in Fourier space
-
-**Simultaneous Iterative Reconstruction Technique (SIRT):**
-- Iterative refinement: start from a zero volume, forward-project, compare to data,
-  back-project the difference, update the volume; repeat ~10–50 iterations
-- Substantially reduces streaking from high-contrast features
-- Produces smoother, lower-contrast results — better for visual inspection and segmentation
-- Much slower than WBP; less suitable for high-resolution sub-tomogram averaging
-
-Reconstruct both, save them as separate `.rec` files, and compare them in 3dmod.
+The download consists of per-tilt multi-frame `.mrc` files and SerialEM `.mdoc` metadata
+files encoding acquisition parameters, tilt angles, nominal defocus, and stage position
+for each frame. **Start the download before anything else.** Total size for TS_01 is 8–12 GB
+and may take 30–60 minutes on a typical connection.
 
 ---
 
-## Diagnostic questions
+## How this module connects to Modules 01 and 02
 
-You must answer all four questions in `build_and_diagnose_tomogram.md`.
+Modules 01 and 02 built the computational foundations in Python. Module 03 applies the same
+concepts in production software on real data.
 
-### Q1 — Alignment quality
-
-After fiducial tracking converges in Etomo, record:
-- The **final mean residual** in pixels
-- Which tilt angles contribute the **largest per-tilt residuals** and why (beam-induced
-  specimen drift at high tilt? Poor bead tracking at the tilt extremes?)
-- Whether high-tilt or low-tilt images are more problematic, and the physical explanation
-
-Expected: mean residual < 0.5 px is good; > 1.5 px suggests a tracking problem.
-
-### Q2 — Missing-wedge artefact
-
-In 3dmod's Slicer tool, rotate the reconstructed tomogram around the tilt axis and observe
-direction-dependent elongation of spherical objects (gold beads, ribosome densities).
-
-Then reconstruct a second time after **excluding all tilts beyond ±40°** (Etomo's
-"Exclude Views" option) to exaggerate the missing wedge. Compare:
-- Which structural features distort most as angular coverage worsens
-- The artifact in the Z (beam) direction vs the XY plane
-- Whether membranes, ribosomes, or gold beads are most affected, and why
-
-This connects directly to the Fourier-space missing-wedge visualisation in Module 02.
-
-### Q3 — WBP vs SIRT
-
-Pick the same region of interest (a membrane patch, a cluster of ribosomes, and a gold
-bead) in both reconstructions and compare:
-- **Streaking** — which method shows less linear artefacting near high-contrast objects?
-- **Sharpness** — which looks crisper? Which looks smoother?
-- **Contrast** — how do membrane densities compare between the two methods?
-- **Practical choice** — which would you trust for template matching (finding ribosomes
-  systematically)? Which for manual or automated segmentation?
-
-The standard answer: WBP for sub-tomogram averaging (template matching), SIRT for
-visualisation and segmentation — but the notebook asks you to justify this from the data.
-
-### Q4 — Pixel size
-
-In Etomo, note the **pixel size** reported for the final reconstructed tomogram. Explain:
-- How this relates to the physical pixel size on the detector (in microns)
-- How the magnification and binning factor affect it
-- What binning 2× or 4× costs you in resolution and gains you in computation and contrast
+| Computational concept (Modules 01–02) | Production equivalent (Module 03) |
+|--------------------------------------|-----------------------------------|
+| CTF simulation and phase-flip correction | CTF correction toggle in Etomo before WBP reconstruction |
+| Missing wedge in synthetic back-projection | Missing-wedge Z-elongation observed in 3dmod Slicer (Q2) |
+| WBP via Fourier Slice Theorem | Etomo `radial` filter weighted back-projection |
+| SIRT iterative error-correction loop | Etomo SIRT with configurable iteration count |
+| NCC alignment of 2-D class averages | Fiducial bead tracking across the tilt series |
+| FRC resolution curve | Nyquist limit calculation and visual assessment (Q4) |
 
 ---
 
-## How to view the tomogram in 3dmod
+## Setup
+
+No Python environment is needed. All processing uses IMOD/Etomo.
 
 ```bash
-# Open the reconstruction
-3dmod TS_01_WBP.rec
+# IMOD — Linux (Ubuntu 20.04+)
+# Download the installer from https://bio3d.colorado.edu/imod/download.html
+sudo bash imod_4.XX.XX_RHEL7-64_CUDA10.1.sh
 
-# In 3dmod:
-#   Ctrl+T  → open Slicer (for arbitrary-angle cross-sections)
-#   Ctrl+G  → open 3dmod model window (for segmentation)
-#   Middle-click drag in Slicer → rotate the slab
-#   Scroll wheel → move through Z slices in the main window
+# Make IMOD commands available in your current shell
+source /etc/imod-setup.sh   # add this line to ~/.bashrc for persistence
+
+# Verify the installation
+3dmod --version
+etomo --help
 ```
 
-The Slicer is essential for Q2. Set the slab thickness to ~5 nm, orient it perpendicular
-to the tilt axis, and watch features elongate as you rotate toward the beam direction.
+For Warp installation and configuration see https://www.warpem.com/warp/
 
 ---
 
-## Troubleshooting
+## Common errors and how to fix them
 
-| Problem | Likely cause | Solution |
-|---------|-------------|---------|
-| Fiducial tracking fails repeatedly | Wrong bead radius set | Open a tilt image in 3dmod, measure the bead diameter in pixels, re-enter in Etomo |
-| Residuals do not converge below 2 px | Stage drift between tilts; poor bead distribution | Exclude extreme tilts; add more manually tracked beads; check `.mdoc` for large stage-shift jumps |
-| Reconstruction is all black | Wrong input file path or wrong orientation | Verify the aligned stack `.ali` file is non-empty; check Etomo's axis orientation setting |
-| 3dmod crashes on opening the `.rec` | File is incomplete | Check that the reconstruction job finished; re-run if the log shows an error |
-| IMOD not found after installation | PATH not updated | Add `source /etc/imod-setup.sh` (or the equivalent for your platform) to `.bashrc` |
+| Error | Likely cause | Fix |
+|-------|-------------|-----|
+| Fiducial tracking fails to find seeds | Bead radius set too large or too small | Open one tilt in 3dmod, measure several bead diameters in pixels, divide by 2, re-enter in Etomo |
+| Residuals do not converge below 2 px | Poor bead distribution; large stage-shift jump in `.mdoc` | Exclude tilts with anomalously large per-tilt residuals; add more manually seeded beads across the field of view |
+| Reconstruction is entirely black | Wrong `.ali` file path or incorrect tilt axis orientation | Confirm the aligned stack `.ali` is non-empty (`ls -lh TS_01.ali`); check the tilt axis angle in Etomo |
+| 3dmod crashes when opening the `.rec` | Reconstruction did not finish | Check that the Etomo log shows a normal exit; re-run if any error is present in the log |
+| IMOD commands not found after installation | PATH not updated | Run `source /etc/imod-setup.sh` and add this line to `~/.bashrc` |
+| Warp refuses to import `.mrc` files | Frame count mismatch with `.mdoc` | Ensure you downloaded all frame files for each tilt; the `.mdoc` line count should match the file count |
+
+---
+
+## Tips for beginners
+
+- **Start the download before anything else.** TS_01 is 8–12 GB. Starting it the evening before the session saves a frustrating wait at the beginning.
+- Open 3dmod and inspect the raw tilt stack before running any alignment. You should see gold beads clearly in the zero-degree tilt. If you cannot, something is wrong with the stack assembly step — troubleshoot there rather than in Etomo.
+- When bead tracking fails repeatedly, do not keep re-running automatic tracking with the same settings. Instead, manually pick 5–10 beads spread across the field of view in the first, middle, and last tilt images, then let Beadtrack propagate from those seeds. Manual seed placement solves the majority of tracking failures.
+- Compare WBP and SIRT at the **same Z slice** at the **same display contrast**. Use 3dmod's Image Processing → Contrast window to normalise both before comparing — WBP and SIRT have very different intensity ranges, and comparing them without normalisation is misleading.
+- When reconstructing with the reduced ±40° tilt range for Q2, save it as a separate file (`TS_01_limited.rec`) rather than overwriting your full reconstruction.
+- Gold beads are the most reliable diagnostic for Q2. They are perfectly spherical in reality, so every deviation you see in 3dmod is a pure reconstruction artefact with no ambiguity from biological shape variation.
+- The Slicer is essential for Q2. Set the slab thickness to 1 voxel, orient it perpendicular to the tilt axis, and rotate around the Y axis while watching a single bead — the elongation appears and disappears as you rotate through the beam direction.
 
 ---
 
 ## Further reading
 
+- Mastronarde, D.N. (1997). "Dual-axis tomography: an approach with alignment methods that preserve resolution." *Journal of Structural Biology* 120, 343–352. — The original paper introducing the fiducial alignment approach implemented in IMOD.
+- Bharat, T.A.M. & Scheres, S.H.W. (2016). "Resolving macromolecular structures from electron cryo-tomography data using subtomogram averaging in RELION." *Nature Protocols* 11, 2054–2065.
 - IMOD/Etomo user guide: https://bio3d.colorado.edu/imod/doc/etomoTutorial.html
 - teamtomo EMPIAR-10164 walkthrough: https://teamtomo.org/teamtomo-site-archive/walkthroughs/EMPIAR-10164/
 - Warp documentation: https://www.warpem.com/warp/
-- Mastronarde, D.N. (1997). "Dual-axis tomography: an approach with alignment methods that
-  preserve resolution." *Journal of Structural Biology* 120, 343–352. — The original paper
-  introducing the fiducial alignment approach implemented in IMOD.

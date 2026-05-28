@@ -1,30 +1,20 @@
 # Phase 04 — CryoEM & Structural Biology
 
-**Level: Specialist** · Phase 01 Module 02 (Fourier transforms) and NumPy/SciPy fluency are required. No prior structural-biology background is assumed — the relevant physics is developed from first principles.
+**Level: Specialist** · Phase 01 Module 02 (Fourier transforms) and NumPy/SciPy fluency are required. No prior structural-biology background is assumed — the physics is developed from first principles.
 
-CryoEM is one of the most computationally demanding fields in modern science. The electron dose must remain so low to prevent radiation damage that typical micrograph SNR is between 0.01 and 0.1 — signal buried 10 to 100 times below noise. Recovering atomic-resolution protein structure from these images requires a set of signal-processing techniques that are among the most sophisticated in applied science. This phase builds the foundational understanding that makes those techniques interpretable, from the forward imaging model all the way to a real cryo-ET tomogram processed with production software.
-
----
-
-## The Resolution Revolution
-
-CryoEM underwent a step-change around 2013 driven by three simultaneous advances:
-
-- **Direct electron detectors** replacing scintillator cameras — dramatically lower readout noise, enabling movie-mode acquisition for beam-induced motion correction
-- **CTF correction** methods that had previously been approximate became accurate to sub-ångström precision
-- **Maximum-likelihood reconstruction algorithms** (RELION, then cryoSPARC) replacing older back-projection with full Bayesian inference over particle orientations
-
-The result: structures that had previously required crystallography or been simply inaccessible (membrane proteins, large dynamic complexes) could now be solved at 2–4 Å resolution. Understanding the computational machinery behind this revolution is the goal of Phase 04.
+CryoEM is computationally demanding because the experiment cannot provide clean data. To prevent radiation damage the electron dose must be kept extremely low — roughly 20–60 electrons per square ångström — which means the raw micrographs have SNR between 0.01 and 0.1. The signal is buried 10–100× beneath noise. Recovering a protein structure from these images requires a tightly coupled chain of signal-processing steps, each of which this phase builds from the ground up. You will simulate the imaging physics yourself, implement the reconstruction mathematics in code, and finally apply the same ideas to a real published dataset using the production software stack.
 
 ---
 
 ## Contents
 
-| # | Subfolder | Core topic | Files | GPU / local install? |
-|---|-----------|-----------|-------|----------------------|
-| 1 | [`01_LowSNRNoiseProcessing`](01_LowSNRNoiseProcessing/) | CTF simulation, denoising, particle picking, class averaging, FRC | `cryoem_low_snr_tutorial.ipynb` | No (CPU only) |
-| 2 | [`02_3DCryoEMReconstruction`](02_3DCryoEMReconstruction/) | Forward model, CTF correction, Fourier Slice Theorem, back-projection, EM pose estimation, NeRF reconstruction | `cryoem_reconstruction_tutorial.ipynb` | Optional (NeRF section) |
-| 3 | [`03_TomogramDiagnosisBuild`](03_TomogramDiagnosisBuild/) | Hands-on cryo-ET workflow on EMPIAR-10164: stacking, fiducial alignment, WBP/SIRT reconstruction, tomogram diagnosis | `build_and_diagnose_tomogram.md` | Yes — IMOD installed locally |
+| Subfolder | Topic | Files |
+|-----------|-------|-------|
+| [`01_LowSNRNoiseProcessing`](01_LowSNRNoiseProcessing/) | SNR intuition, CTF simulation, classical denoising, particle picking, 2-D class averaging, FRC, Noise2Void | `cryoem_low_snr_tutorial.ipynb` |
+| [`02_3DCryoEMReconstruction`](02_3DCryoEMReconstruction/) | Forward model, CTF correction, Fourier Slice Theorem, trilinear back-projection, EM pose estimation, NeRF-style reconstruction | `cryoem_reconstruction_tutorial.ipynb` |
+| [`03_TomogramDiagnosisBuild`](03_TomogramDiagnosisBuild/) | Hands-on cryo-ET workflow on EMPIAR-10164: tilt-series stacking, fiducial alignment, WBP and SIRT reconstruction, tomogram diagnosis | `build_and_diagnose_tomogram.md` |
+
+Modules 01 and 02 are CPU-only Jupyter notebooks and run on Google Colab. Module 03 is a local software practical requiring IMOD/Etomo on Linux or macOS.
 
 ---
 
@@ -32,113 +22,66 @@ The result: structures that had previously required crystallography or been simp
 
 ### Module 01 — Low-SNR Image Processing for CryoEM
 
-The entry point to cryoEM computation. Everything starts from a single central insight: each electron micrograph of a biological molecule is so noisy that no single image is interpretable. The solution is averaging — collect hundreds of thousands of copies of the same molecule, align them, and average them. Noise cancels; signal adds coherently; SNR improves as √N.
+Everything in cryoEM starts from one uncomfortable fact: no single image of a biological molecule is interpretable. The electron dose required to preserve the specimen keeps SNR so low that signal and noise are indistinguishable in any individual frame. The solution is coherent averaging — collect thousands to millions of copies of the same molecule, align them, and average. Noise cancels stochastically while signal accumulates, improving SNR as √N. This module makes that insight concrete by measuring it directly: watch SNR improve from −10 dB to +10 dB as the number of averaged particles grows from 1 to 1000.
 
-This module makes that insight concrete by simulating a complete cryoEM micrograph from scratch: start with a clean phantom, apply the Contrast Transfer Function (CTF) that the microscope's optics impose, add Poisson shot noise and Gaussian readout noise, and arrive at a realistic low-SNR image. Every subsequent step is a systematic attempt to recover the original phantom.
+The central complication is the **Contrast Transfer Function (CTF)** — the oscillating phase-contrast function imposed by the microscope's optics. The CTF destroys information completely at specific spatial frequencies (visible as Thon rings in the power spectrum), and images acquired at different defoci have their zeros at different positions. Particles cannot be averaged coherently without first correcting this phase modulation. The module implements and compares phase-flip correction (fast, restores phase coherence but not amplitude at zeros) and Wiener filtering (optimal under Gaussian noise, requires a noise PSD estimate). Classical denoising methods — Gaussian smoothing, median filtering, and Butterworth bandpass filtering — are benchmarked with PSNR and SSIM; the bandpass filter is shown to be the standard pre-processing choice because it cleanly separates ice background gradients, particle signal, and detector read-out noise.
 
-**CTF** is the central complication. The oscillating phase-contrast function destroys information completely at specific spatial frequencies (Thon rings). Images acquired at different defoci have their zeros in different places — particles cannot be averaged directly without first restoring phase coherence. The module implements and compares phase-flip correction (fast, does not restore amplitude) and Wiener filtering (optimal under Gaussian noise, requires noise PSD estimate).
+The module then builds the two downstream tools that feed into Module 02: template-matching particle picking (normalised cross-correlation in Fourier space, with a threshold sweep showing the recall-precision trade-off) and 2-D class averaging (K-means clustering of NCC-aligned particle boxes, with SNR measured directly). Fourier Ring Correlation (FRC) is introduced as the gold-standard resolution measurement, and the module closes with a conceptual introduction to Noise2Void — the leading self-supervised deep denoiser for cryoEM, where no clean ground-truth images exist.
 
-**Classical denoising** — Gaussian smoothing, median filtering, Wiener filtering, and bandpass filtering — are implemented and benchmarked with PSNR and SSIM. The bandpass filter (Butterworth high-pass × low-pass) is shown to be the standard choice because it cleanly separates the three frequency regimes: ice background gradients, particle signal, and detector noise.
-
-**Particle picking** via normalised cross-correlation (NCC) is implemented in Fourier space for efficiency. Local maxima above a confidence threshold give particle coordinates; the threshold sweep demonstrates the recall-precision trade-off explicitly.
-
-**2-D class averaging** extracts particle boxes, aligns them by maximising NCC over in-plane rotations and translations, clusters with K-means, and averages within each class. The SNR improvement from averaging 1000 particles per class is measured directly.
-
-**Fourier Ring Correlation (FRC)** is introduced as the gold-standard resolution measurement: split the particle stack in two, average each half independently, and measure the Fourier correlation as a function of spatial frequency. The frequency at which correlation drops below 0.143 defines resolution. The module demonstrates why visual smoothness is a misleading proxy for true resolution — a blurry average can look nicer than a grainier one that actually passes FRC at higher resolution.
-
-**Noise2Void** is introduced conceptually as the leading self-supervised deep-denoising approach for cryoEM, where no clean ground-truth exists.
-
-**Key skills:** CTF formula and parameter effects, `np.fft.fft2` for Fourier filtering, NCC in Fourier space, K-means class averaging, FRC curve, `noise2void` blind-spot concept.
+**Key skills:** CTF formula and defocus effects, `np.fft.fft2` for Fourier filtering, NCC particle picking in Fourier space, K-means class averaging, FRC and the 0.143 half-bit criterion, Noise2Void blind-spot concept.
 
 ---
 
 ### Module 02 — 3-D CryoEM Reconstruction
 
-Module 01 established 2-D signal processing. Module 02 extends everything to 3-D and builds the complete reconstruction pipeline from first principles.
+Module 01 established 2-D micrograph-level signal processing. Module 02 extends every concept into 3-D and builds the complete reconstruction pipeline from mathematical first principles. The starting point is the forward imaging model under the **weak-phase object approximation**: a 3-D electron density $V(\mathbf{r})$ is projected to 2-D along a rotation $R$, convolved with the CTF point spread function, and corrupted with noise. All three operations are implemented as differentiable PyTorch code, establishing the foundation for the NeRF-style reconstruction section at the end.
 
-**The forward imaging model** is derived under the weak-phase object approximation: a 3-D molecule projected to 2-D, convolved with the CTF point spread function, and corrupted with noise. All three operations are implemented as differentiable code, establishing the foundation for the NeRF-style section at the end.
+The **Fourier Slice Theorem** is the central result: the 2-D Fourier transform of a projection equals the values of the 3-D Fourier transform along the central slice perpendicular to the projection direction. The module makes this tangible by visualising the 3-D Fourier volume filling up slice by slice as more projections are added at different angles — the single most effective way to build reconstruction intuition. **Trilinear gridding back-projection** implements this correctly: because Fourier slices land at non-grid positions in 3-D, values must be distributed to neighbouring grid points with trilinear interpolation weights, and a density-compensation weight volume corrects for non-uniform Fourier-space coverage.
 
-**The Fourier Slice Theorem** is the central theorem of tomographic reconstruction: the 2-D Fourier transform of a projection equals the values of the 3-D Fourier transform along the central slice perpendicular to the projection direction. The module visualises the 3-D Fourier volume filling up slice by slice as more projections are added from different angles — the single most effective way to build intuition for how reconstruction works.
+The hardest real-world problem in cryoEM — that particle orientations are completely unknown on the cryo-grid — is addressed by **Expectation-Maximisation pose estimation**. The E-step computes posterior weights over a discrete set of reference orientations by cross-correlation; the M-step updates the 3-D volume as a weighted back-projection. A simplified version is implemented from scratch and shown to converge over 20+ iterations. The module closes with a **NeRF-style differentiable reconstruction** that represents 3-D density as an implicit neural field optimised end-to-end through the full forward model — an approach that naturally handles conformational heterogeneity that a single-volume EM reconstruction would smear.
 
-**Trilinear gridding back-projection** implements the reconstruction algorithm correctly: Fourier slices land at non-grid positions in 3-D, so values must be distributed to neighbouring grid points with trilinear interpolation weights. A weight volume (the density of Fourier coverage) divides the accumulated signal to correct for non-uniform sampling.
+**Key skills:** weak-phase object approximation, CTF Wiener correction, Fourier Slice Theorem proof and code, trilinear gridding, B-sharpening and Guinier analysis, missing-wedge visualisation, EM algorithm E/M steps, `torch.nn.functional.grid_sample` for differentiable warp.
 
-**B-factor sharpening** compensates for the exponential amplitude fall-off at high frequencies caused by CTF envelope, particle motion, and detector modulation. Guinier analysis identifies the optimal B from the linear slope of the log-power spectrum.
-
-**The missing wedge** — the cone of Fourier space unsampled in single-axis tilt tomography (which cannot tilt beyond ~±70°) — is shown in both Fourier space (the missing cone) and real space (a reconstructed sphere elongated along the beam axis). The practical consequences for downstream analysis are discussed.
-
-**Expectation-Maximisation pose estimation** tackles the hardest real-world problem: particle orientations are completely unknown on the cryo-grid. The EM algorithm treats orientations as latent variables: the E-step computes posterior weights over a discrete set of reference orientations via cross-correlation; the M-step updates the 3-D volume as a weighted back-projection. The module implements a simplified version and shows convergence over 20+ iterations.
-
-**NeRF-style differentiable reconstruction** represents the 3-D density as an implicit neural field and optimises it end-to-end by back-propagating through the full forward model. This approach handles heterogeneous datasets (multiple conformational states) where classical single-volume EM would produce a blurred average.
-
-**Key skills:** weak-phase object approximation, CTF phase-flip and Wiener correction, Fourier Slice Theorem, trilinear gridding, B-sharpening, Guinier analysis, missing wedge, EM algorithm latent-variable formulation, `torch.nn.functional.grid_sample` for differentiable warp.
+**Connects to:** Module 03 — every concept (CTF, missing wedge, WBP, SIRT, NCC alignment, FSC) reappears as production software settings in Etomo, giving you the vocabulary to interpret every dialogue box.
 
 ---
 
-### Module 03 — Build & Diagnose a Real Cryo-ET Tomogram (EMPIAR-10164)
+### Module 03 — Build & Diagnose a Real Cryo-ET Tomogram
 
-A hands-on practical rather than a Jupyter notebook. You will process real cryo-ET data of *Mycoplasma pneumoniae* from the EMPIAR public archive using IMOD/Etomo — the same software stack used by structural-biology labs worldwide.
+This is a hands-on practical rather than a Jupyter notebook. You will process a real cryo-ET tilt series of *Mycoplasma pneumoniae* from the EMPIAR-10164 public archive using IMOD/Etomo — the same software stack used by structural-biology labs worldwide. The three processing steps (stack → align → reconstruct) are carried out in full, and four guided diagnostic questions connect every result back to the computational theory in Modules 01 and 02.
 
-The practical bridges the gap between "I understand the algorithm in a notebook" and "I can operate production software on real data."
+**Step A — Tilt-stack assembly:** Each tilt angle is recorded as a movie of multiple frames that must be motion-corrected and averaged before stacking. With Warp available, its per-patch polynomial motion model produces the best results; the IMOD-only path using `alignframes` also works with slightly lower quality. The output is a single `.st` file with one corrected image per tilt angle.
 
-**Step A — Tilt-series stacking:** Each tilt angle is recorded as a movie of multiple frames that must be aligned and averaged to correct beam-induced sample motion. The corrected frames are stacked into a single file that Etomo can process. With Warp available: follow the teamtomo motion-correction workflow. Without Warp: use IMOD's `alignframes` directly.
+**Step B — Fiducial-based alignment:** Colloidal gold beads are tracked through the full tilt range in Etomo to fit a per-tilt geometric transformation. The target is a mean fiducial residual below 0.5 pixels; high-tilt images routinely contribute the worst per-tilt residuals due to foreshortened bead geometry and longer beam paths through the ice.
 
-**Step B — Fiducial alignment:** Gold bead fiducials are tracked automatically through the full tilt range. The goal is a mean fiducial residual below 0.5 pixels — larger residuals indicate the tracked bead model does not fit the data well and the reconstruction will be blurred. High-tilt images (>±50°) typically contribute the largest per-tilt residuals because foreshortening elongates the fiducials and makes tracking harder.
+**Step C — Dual reconstruction:** Both Weighted Back Projection (WBP — fast, linear, gold standard for sub-tomogram averaging) and SIRT (iterative, smoother, less streaking, preferred for segmentation) are reconstructed and compared side by side in 3dmod.
 
-**Step C — Dual reconstruction:** Reconstruct with Weighted Back Projection (WBP, fast, linear, standard for sub-tomogram averaging) and SIRT (iterative, suppresses streaking from high-contrast objects, better for visualisation and segmentation). Save both, compare in 3dmod.
+Four diagnostic questions require written answers and 3dmod screenshots: alignment quality (fiducial residuals), the missing-wedge artefact (Z-elongation of spherical objects), WBP vs SIRT (streaking, sharpness, application suitability), and pixel size/Nyquist limit.
 
-**Four diagnostic questions** anchor the practical to the computational theory from Modules 01 and 02:
-
-- **Q1 — Alignment quality:** record the final mean residual and identify which tilts contribute the worst residuals
-- **Q2 — Missing wedge:** reconstruct with and without high-tilt views, compare Z-elongation of spherical objects (gold beads, ribosomes) in 3dmod's Slicer
-- **Q3 — WBP vs SIRT:** compare streaking, sharpness, contrast, and suitability for template matching vs segmentation on the same region of interest
-- **Q4 — Pixel size:** explain how detector pixel size, magnification, and binning combine to set the Nyquist limit, and assess whether the reconstruction approaches that limit visually
-
-**Key skills:** IMOD/Etomo fiducial tracking, residual analysis, WBP `radial` weighting filter, SIRT iteration count choice, 3dmod Slicer tool, missing-wedge visualisation.
+**Key skills:** IMOD/Etomo fiducial tracking, residual interpretation, WBP radial filter, SIRT iteration count, 3dmod Slicer tool, missing-wedge diagnosis, pixel size and Nyquist calculation.
 
 ---
 
 ## Learning Goals
 
-After completing Phase 04 you will be able to:
+After finishing this phase you will be able to:
 
-- Explain why cryoEM micrographs have SNR < 0.1 and derive the √N SNR improvement that averaging provides
-- Write the CTF formula, explain the role of each parameter (defocus, spherical aberration, wavelength), simulate its effect in code, and correct it with both phase-flipping and Wiener filtering
-- Perform template-matching particle picking via normalised cross-correlation and evaluate the recall-precision trade-off
-- Compute 2-D class averages and read a Fourier Ring Correlation (FRC) resolution curve — and explain why the 0.143 half-bit criterion is the correct threshold
-- Derive the Fourier Slice Theorem from scratch and implement trilinear-gridding back-projection
-- Understand how the EM algorithm jointly estimates particle orientations and the 3-D reconstruction volume, and implement a simplified version
-- Use IMOD/Etomo to align a real cryo-ET tilt series with fiducials and produce both WBP and SIRT reconstructions
+- Explain why cryoEM micrographs have SNR < 0.1 and derive the √N SNR improvement from coherent averaging
+- Write the CTF formula, simulate its effect in code, and correct it with phase-flipping and Wiener filtering
+- Perform template-matching particle picking via normalised cross-correlation and evaluate the recall-precision trade-off as a function of detection threshold
+- Compute 2-D class averages and read a Fourier Ring Correlation resolution curve; explain why the 0.143 half-bit criterion is the correct threshold
+- Derive the Fourier Slice Theorem and implement trilinear-gridding back-projection with density compensation
+- Understand how the EM algorithm jointly estimates particle orientations and the 3-D reconstruction, and implement a simplified version from scratch
+- Use IMOD/Etomo to align a real cryo-ET tilt series with gold fiducials and reconstruct both WBP and SIRT tomograms
 - Identify the missing-wedge artefact in a real tomogram and explain its origin in Fourier space
-
----
-
-## How the Modules Build on Each Other
-
-```
-Module 01 — 2-D signal processing           Module 02 — 3-D extension
-──────────────────────────────────────       ────────────────────────────────────
-Simulate CTF + noise              ──────►    Same CTF, applied to 3-D projections
-Classical denoising (bandpass)    ──────►    Pre-processing before reconstruction
-Particle picking (NCC)            ──────►    NCC reused in EM E-step
-2-D class averaging               ──────►    2-D averages initialise 3-D refinement
-FRC resolution                    ──────►    Extends to 3-D FSC (Fourier Shell Correlation)
-Noise2Void concept                           NeRF-style differentiable reconstruction
-
-                    Module 03 — Real data
-                    ─────────────────────────────────────
-                    All concepts above in production software
-                    IMOD fiducial alignment
-                    WBP vs SIRT reconstruction comparison
-                    Tomogram diagnosis on EMPIAR-10164
-```
 
 ---
 
 ## Prerequisites
 
-- **Phase 01, Module 02** (Fourier transforms, spatial frequency, FFT) — used constantly throughout
+- **Phase 01, Module 02** (Fourier transforms, spatial frequencies, FFT) — used throughout all three modules
 - NumPy, SciPy, and Matplotlib fluency
-- **Module 03 only:** IMOD/Etomo installed on a local Linux or macOS machine (not Colab-compatible); ~20 GB free disk space for the dataset download
+- **Module 03 only:** IMOD/Etomo installed on a local Linux or macOS machine; approximately 20 GB free disk space; internet access for the EMPIAR dataset download
 
 ---
 
@@ -146,37 +89,30 @@ Noise2Void concept                           NeRF-style differentiable reconstru
 
 | Module | Compute | Notes |
 |--------|---------|-------|
-| 01 — Low-SNR Processing | CPU only | All NumPy/SciPy; Colab CPU runtime sufficient |
-| 02 — 3-D Reconstruction | CPU (most), GPU optional | NeRF section benefits from GPU but falls back to CPU |
-| 03 — Tomogram Practical | Local machine with IMOD | Linux or macOS; WSL2 on Windows |
+| 01 — Low-SNR Processing | CPU only | All NumPy/SciPy; Colab free tier is sufficient |
+| 02 — 3-D Reconstruction | CPU (most sections), GPU optional | The NeRF section benefits from GPU but falls back to CPU |
+| 03 — Tomogram Practical | Local machine with IMOD | Colab-incompatible; Linux or macOS required (WSL2 on Windows) |
 
 ---
 
-## Software Installation (Module 03)
+## Setup
 
 ```bash
-# IMOD — Linux (Ubuntu 20.04+)
-# Download from https://bio3d.colorado.edu/imod/download.html and run:
+# Modules 01 and 02 — Python dependencies
+# Each notebook also installs its own requirements in the first cell
+pip install numpy scipy matplotlib scikit-image torch tqdm
+
+# Module 03 — IMOD (Linux, Ubuntu 20.04+)
+# Download the installer from https://bio3d.colorado.edu/imod/download.html
 sudo bash imod_4.XX.XX_RHEL7-64_CUDA10.1.sh
-
-# Warp (optional, recommended for motion correction)
-# https://www.warpem.com/warp/
-
-# Add IMOD to your PATH
 source /etc/imod-setup.sh   # add to ~/.bashrc for persistence
+3dmod --version             # verify installation
+
+# Warp (optional, recommended for Module 03 motion correction)
+# https://www.warpem.com/warp/
 ```
 
----
-
-## Dataset Download (Module 03)
-
-The practical uses tilt series TS_01 from EMPIAR-10164. Follow the teamtomo preparation script to download the per-tilt multi-frame `.mrc` files and SerialEM `.mdoc` metadata:
-
-```
-https://teamtomo.org/teamtomo-site-archive/walkthroughs/EMPIAR-10164/preparation.html
-```
-
-Approximate download size for TS_01: **8–12 GB**. Begin this download well before you plan to start the practical.
+**Start the EMPIAR-10164 download before anything else.** TS_01 is 8–12 GB and takes 30–60 minutes on a typical connection. Follow the teamtomo preparation script: https://teamtomo.org/teamtomo-site-archive/walkthroughs/EMPIAR-10164/preparation.html
 
 ---
 
@@ -187,19 +123,35 @@ Approximate download size for TS_01: **8–12 GB**. Begin this download well bef
          ↓
 02_3DCryoEMReconstruction
          ↓
-03_TomogramDiagnosisBuild    ← requires Modules 01 + 02 to interpret the software output
+03_TomogramDiagnosisBuild
 ```
 
-The ordering is important. Module 03 will present you with IMOD dialogue boxes and reconstruction outputs that will be difficult to interpret without the CTF, missing wedge, WBP, and SIRT background from Modules 01 and 02.
+The order is strict. Module 03 exposes you to real data and production software; every Etomo setting and every result it produces maps directly to a concept introduced computationally in Modules 01 and 02. Starting Module 03 without that background makes the software difficult to interpret and the diagnostic questions impossible to answer from principle.
+
+---
+
+## How the Modules Connect
+
+Module 01 builds the 2-D micrograph-level signal processing: why images are so noisy, how CTF corrupts specific spatial frequencies, and how averaging recovers the signal. Module 02 takes each of those ideas into 3-D: the Fourier Slice Theorem shows how to assemble a 3-D structure from the projections Module 01 produced, and EM-based pose estimation handles the real experimental problem of unknown particle orientations. Module 03 applies the complete pipeline on real data using production software — every dialogue box in Etomo corresponds to a parameter you set in code in Modules 01 or 02.
+
+| Computational concept (Modules 01–02) | Production equivalent (Module 03) |
+|--------------------------------------|-----------------------------------|
+| CTF simulation and phase-flip correction | CTF correction toggle in Etomo before reconstruction |
+| Particle picking by NCC | Fiducial bead tracking across the tilt series |
+| Missing wedge in synthetic back-projection | Missing-wedge artefact in the real tomogram (Q2) |
+| WBP via Fourier Slice Theorem | Etomo `radial` filter WBP reconstruction |
+| SIRT iterative loop (conceptual) | Etomo SIRT with configurable iteration count |
+| FRC resolution curve | Visual assessment and Nyquist calculation (Q4) |
 
 ---
 
 ## Further Reading
 
-- Kühlbrandt, W. (2014). "The resolution revolution." *Science* 343, 1443–1444. — Short accessible overview of why cryoEM became dominant after 2013.
+- Kühlbrandt, W. (2014). "The resolution revolution." *Science* 343, 1443–1444.
 - Nogales, E. & Scheres, S.H.W. (2015). "Cryo-EM: A Unique Tool for the Visualization of Macromolecular Complexity." *Molecular Cell* 58, 677–689.
-- Grant, T. & Grigorieff, N. (2015). "Measuring the optimal exposure for single particle cryo-EM using a 2.6 Å reconstruction of rotavirus VP6." *eLife* 4, e06980. — The dose-weighting framework behind optimal exposure estimation.
+- Grant, T. & Grigorieff, N. (2015). "Measuring the optimal exposure for single particle cryo-EM using a 2.6 Å reconstruction of rotavirus VP6." *eLife* 4, e06980.
+- Mastronarde, D.N. (1997). "Dual-axis tomography: an approach with alignment methods that preserve resolution." *Journal of Structural Biology* 120, 343–352.
 - RELION tutorial: https://relion.readthedocs.io/en/release-5.0/
 - cryoSPARC guide: https://guide.cryosparc.com/
-- teamtomo walkthrough (used in Module 03): https://teamtomo.org
+- teamtomo EMPIAR-10164 walkthrough: https://teamtomo.org
 - IMOD/Etomo user guide: https://bio3d.colorado.edu/imod/doc/etomoTutorial.html
